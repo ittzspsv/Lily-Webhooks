@@ -8,6 +8,10 @@ class Component:
     def __init__(self, value: dict):
         self.value = value
 
+class Accessory:
+    def __init__(self):
+        self.type = 2
+        self.style = 5
 
 class Content(Component):
     def __init__(self, content: str):
@@ -15,7 +19,6 @@ class Content(Component):
             "type": 10,
             "content": content
         })
-
 
 class Separator(Component):
     def __init__(self, spacing: bool = False, divider: bool = True):
@@ -25,21 +28,19 @@ class Separator(Component):
             "divider": divider
         })
 
+class ButtonLink(Component, Accessory):
+    def __init__(self, label: str | None = None, emoji: str | None = None, url: str = "https://google.com"):
+        Accessory.__init__(self)
 
-class ButtonLink(Component):
-    def __init__(
-        self,
-        label: str = "Label",
-        emoji: str | None = None,
-        url: str = "https://google.com"
-    ):
         payload = {
-            "type": 2,
-            "style": 5,
-            "label": label,
-            "disabled": False,
-            "url": url
+            "type": self.type,   
+            "style": self.style, 
+            "url": url,
+            "disabled": False
         }
+
+        if label is not None:
+            payload["label"] = label
 
         if emoji is not None:
             payload["emoji"] = {
@@ -47,8 +48,29 @@ class ButtonLink(Component):
                 "id": None
             }
 
-        super().__init__(payload)
+        if label is None and emoji is None:
+            raise ValueError("Either an emoji or a label is necessary")
 
+        Component.__init__(self, payload)
+
+class Thumbnail(Component, Accessory):
+    def __init__(self, url: str, spoiler: bool = False):
+        if not url:
+            raise ValueError("Media link not defined")
+
+        Accessory.__init__(self)
+
+        self.type = 11
+
+        payload = {
+            "type": self.type,
+            "spoiler": spoiler,
+            "media": {
+                "url": url
+            }
+        }
+
+        Component.__init__(self, payload)
 
 class Container(Component):
     def __init__(self, accent_color=None, spoiler: bool = False):
@@ -71,19 +93,23 @@ class Container(Component):
         self.components.append(component.value)
         return self
 
-
 class ComponentBuilder:
     def __init__(self):
-        self.components: list[dict] = []
+        self.components: list[Component] = []
 
     def add(self, component: Component):
         if not isinstance(component, Component):
             raise TypeError("Only Component instances can be added")
-        self.components.append(component.value)
+        self.components.append(component)
         return self
 
-    def build(self):
-        return self.components
+    def build(self) -> list[dict]:
+        return [component.value for component in self.components]
+    
+    def legacy_compatible(self) -> bool:
+        return bool(self.components) and all(isinstance(component, ButtonLink)
+            for component in self.components
+        )
 
 class File:
     """
@@ -380,26 +406,38 @@ class Webhook:
         self.avatar_url = url
 
 
-    def _build_payload(self, content, embed, index: int | None = None, component: ComponentBuilder = None):
-        if component is not None:
-            if content is not None or embed is not None:
-                raise ValueError("Component V2 messages cannot include content or embeds")
-
-            if not isinstance(component, ComponentBuilder):
-                raise TypeError("component must be a ComponentBuilder")
-
-            return {
-                "flags": 32768,
-                "components": component.build()
-            }
-
+    def _build_payload(self,content,embed,index: int | None = None,component: ComponentBuilder | None = None):
         payload = {}
 
+        if component is not None:
+            if content is not None or embed is not None and not component.legacy_compatible():
+                raise ValueError("Component V2 messages cannot include content or embeds")
+
+            if isinstance(component, ComponentBuilder):
+                if component.legacy_compatible():
+                    components = [
+                        {
+                            "type": 1,
+                            "components": component.build()
+                        }
+                    ]
+                else:
+                    components = component.build()
+
+            else:
+                raise TypeError("component must be ComponentBuilder")
+            payload["flags"] = 32768
+            payload["components"] = components
+
         if self.username is not None:
-            payload["username"] = self.username[index] if isinstance(self.username, list) else self.username
+            payload["username"] = (
+                self.username[index] if isinstance(self.username, list) else self.username
+            )
 
         if self.avatar_url is not None:
-            payload["avatar_url"] = self.avatar_url[index] if isinstance(self.avatar_url, list) else self.avatar_url
+            payload["avatar_url"] = (
+                self.avatar_url[index] if isinstance(self.avatar_url, list) else self.avatar_url
+            )
 
         if content is not None:
             payload["content"] = content
@@ -413,6 +451,7 @@ class Webhook:
                 raise TypeError("embed must be Embed or list[Embed]")
 
         return payload
+
 
     async def send(self, content: str | None = None, embed: Embed | list[Embed] | None = None, component: ComponentBuilder | None = None, file: Optional[File] = None):
         """
@@ -468,7 +507,6 @@ class Webhook:
 
         if isinstance(self.webhook_url, str):
             payload = self._build_payload(content=content,embed=embed,component=component)
-            print("Payload", payload)
             data = await _post(self.webhook_url, payload)
             return {"id": int(data["id"]), "channel_id": int(data["channel_id"])}
 
